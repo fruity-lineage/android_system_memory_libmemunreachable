@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
 #include <unistd.h>
 
 #include <android-base/test_utils.h>
+#include <bionic/malloc.h>
 
 #include <gtest/gtest.h>
 
@@ -58,6 +60,10 @@ class MemunreachableTest : public ::testing::Test {
   virtual void SetUp() {
     // HWASan does not support malloc_disable, which is required by memunreachable.
     SKIP_WITH_HWASAN;
+    bool iterate_supported;
+    ASSERT_TRUE(android_mallopt(M_GET_MALLOC_ITERATE_SUPPORTED, &iterate_supported,
+                                sizeof(iterate_supported)));
+    if (!iterate_supported) GTEST_SKIP() << "allocator does not support allocation enumeration";
     CleanStack(8192);
     CleanTcache();
   }
@@ -82,6 +88,18 @@ class MemunreachableTest : public ::testing::Test {
     malloc_enable();
   }
 };
+
+TEST(Memunreachable, unsupported_allocator) {
+  bool iterate_supported;
+  ASSERT_TRUE(android_mallopt(M_GET_MALLOC_ITERATE_SUPPORTED, &iterate_supported,
+                              sizeof(iterate_supported)));
+  if (iterate_supported) GTEST_SKIP() << "allocator supports allocation enumeration";
+  UnreachableMemoryInfo info;
+  errno = 0;
+  EXPECT_FALSE(GetUnreachableMemory(info));
+  EXPECT_EQ(ENOTSUP, errno);
+  EXPECT_TRUE(info.leaks.empty());
+}
 
 TEST_F(MemunreachableTest, clean) {
   UnreachableMemoryInfo info;

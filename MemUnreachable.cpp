@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <errno.h>
 #include <inttypes.h>
 #include <string.h>
 
@@ -41,6 +42,7 @@
 #include "ThreadCapture.h"
 
 #include <bionic/mte.h>
+#include <bionic/malloc.h>
 #include "bionic.h"
 #include "log.h"
 #include "memunreachable/memunreachable.h"
@@ -75,14 +77,14 @@ class MemUnreachable {
   HeapWalker heap_walker_;
 };
 
-static void HeapIterate(const Mapping& heap_mapping,
+static bool HeapIterate(const Mapping& heap_mapping,
                         const std::function<void(uintptr_t, size_t)>& func) {
-  malloc_iterate(heap_mapping.begin, heap_mapping.end - heap_mapping.begin,
+  return malloc_iterate(heap_mapping.begin, heap_mapping.end - heap_mapping.begin,
                  [](uintptr_t base, size_t size, void* arg) {
                    auto f = reinterpret_cast<const std::function<void(uintptr_t, size_t)>*>(arg);
                    (*f)(base, size);
                  },
-                 const_cast<void*>(reinterpret_cast<const void*>(&func)));
+                 const_cast<void*>(reinterpret_cast<const void*>(&func))) == 0;
 }
 
 bool MemUnreachable::CollectAllocations(const allocator::vector<ThreadInfo>& threads,
@@ -104,8 +106,11 @@ bool MemUnreachable::CollectAllocations(const allocator::vector<ThreadInfo>& thr
 
   for (auto it = heap_mappings.begin(); it != heap_mappings.end(); it++) {
     MEM_ALOGV("Heap mapping %" PRIxPTR "-%" PRIxPTR " %s", it->begin, it->end, it->name);
-    HeapIterate(*it,
-                [&](uintptr_t base, size_t size) { heap_walker_.Allocation(base, base + size); });
+    if (!HeapIterate(*it,
+                    [&](uintptr_t base, size_t size) { heap_walker_.Allocation(base, base + size); })) {
+      MEM_ALOGE("allocator enumeration failed");
+      return false;
+    }
   }
 
   for (auto it = anon_mappings.begin(); it != anon_mappings.end(); it++) {
@@ -297,6 +302,17 @@ bool GetUnreachableMemory(UnreachableMemoryInfo& info, size_t limit) {
   if (info.version > 0) {
     MEM_ALOGE("unsupported UnreachableMemoryInfo.version %zu in GetUnreachableMemory",
               info.version);
+    return false;
+  }
+
+  bool iterate_supported;
+  if (!android_mallopt(M_GET_MALLOC_ITERATE_SUPPORTED, &iterate_supported,
+                       sizeof(iterate_supported))) {
+    return false;
+  }
+  if (!iterate_supported) {
+    MEM_ALOGE("native allocator does not support allocation enumeration");
+    errno = ENOTSUP;
     return false;
   }
 
